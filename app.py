@@ -123,6 +123,13 @@ def add_rule_segments(df_clean: pd.DataFrame) -> pd.DataFrame:
         df["it_spend_tier"] = "Unknown"
 
     device_cols = [c for c in ["no_of_pc", "no_of_desktops", "no_of_laptops", "no_of_routers", "no_of_servers", "no_of_storage_devices"] if c in df.columns]
+
+    # --- ADD THIS BLOCK ---
+    # Force convert device columns to numeric, turning text/errors into NaN
+    for c in device_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # ----------------------
+
     df["device_total"] = df[device_cols].sum(axis=1, min_count=1) if device_cols else np.nan
     df["log_device_total"] = np.log1p(df["device_total"])
     df["device_tier"] = safe_qcut(df["log_device_total"], q=4, labels=["dev_low", "dev_mid", "dev_high", "dev_top"]).astype("string")
