@@ -499,17 +499,237 @@ with tab1:
     st.dataframe(filtered.head(200), use_container_width=True)
 
 with tab2:
-    st.subheader("Segment Summary")
-    seg_counts = filtered["segment_label"].value_counts().reset_index()
-    seg_counts.columns = ["segment_label", "count"]
-    st.dataframe(seg_counts.head(50), use_container_width=True)
+    st.subheader("Explore Segments")
 
-    st.subheader("Top segments chart")
-    top = seg_counts.head(15)
-    fig = plt.figure()
-    plt.bar(top["segment_label"].astype(str), top["count"])
-    plt.xticks(rotation=90)
+    st.markdown(
+        """
+        **What segmentation is doing:**  
+        We group companies into **segments** based on similarity in firmographic and operational attributes (e.g., size, geography, industry, entity type, and operational indicators).  
+        Each segment is a **peer group**—companies that “look alike” in this dataset.
+
+        **What insights this enables:**  
+        - **Benchmarking:** compare a company against its segment’s typical profile (e.g., revenue/employee/IT spend vs peers)  
+        - **Peer discovery:** find similar companies for competitive analysis or partner targeting  
+        - **Risk/anomaly spotting:** surface companies that are unusual within their segment (e.g., high complexity for small size)
+                """
+    )
+
+    # ---------- Helper: pick columns safely ----------
+    col_name = pick_col(filtered, ["company_name", "name", "company"])
+    col_sic_desc = pick_col(filtered, ["8_digit_sic_description", "sic_description"])
+    col_emp = pick_col(filtered, ["employees_total", "employees_single_site"])
+    col_rev = pick_col(filtered, ["revenue_usd"])
+    col_it = pick_col(filtered, ["it_spend", "it_budget"])
+    col_dev = pick_col(filtered, ["device_total"])
+    col_country = pick_col(filtered, ["country"])
+    col_entity = pick_col(filtered, ["entity_type"])
+
+    # ---------- Build a lightweight df just for segmentation UI (DO NOT mutate filtered) ----------
+    needed_cols = ["segment_label"]
+    for c in [col_name, col_sic_desc, col_emp, col_rev, col_it, col_dev, col_country, col_entity]:
+        if c and c in filtered.columns:
+            needed_cols.append(c)
+    needed_cols = list(dict.fromkeys(needed_cols))  # dedupe, keep order
+
+    seg_df_base = filtered[needed_cols].copy()
+
+    # Ensure segment_id exists WITHOUT touching filtered
+    if "segment_id" in filtered.columns:
+        seg_df_base["segment_id"] = filtered["segment_id"].values
+    else:
+        seg_df_base["segment_id"] = seg_df_base["segment_label"].astype("category").cat.codes
+
+    # ---------- Cache heavy computations (counts + titles) ----------
+    @st.cache_data(show_spinner=False)
+    def build_segment_tables_small(df, col_country, col_entity, col_sic_desc):
+        # counts
+        seg_counts = (
+            df.groupby(["segment_id", "segment_label"], dropna=False)
+            .size()
+            .reset_index(name="count")
+            .sort_values(["count", "segment_id"], ascending=[False, True])
+            .reset_index(drop=True)
+        )
+        seg_counts["segment_key"] = seg_counts["segment_id"].apply(lambda x: f"S{int(x)}")
+        seg_counts["share_%"] = (seg_counts["count"] / max(len(df), 1) * 100).round(1)
+
+        # segment title (top entity | top industry | top country) using groupby apply (cached once)
+        def top_of(col):
+            if not col or col not in df.columns:
+                return None
+            return (
+                df[[ "segment_id", col ]]
+                .assign(**{col: df[col].fillna("Unknown").astype(str)})
+                .groupby("segment_id")[col]
+                .apply(lambda s: s.value_counts().index[0] if len(s.value_counts()) else "Unknown")
+            )
+
+        top_country = top_of(col_country)
+        top_entity = top_of(col_entity)
+        top_ind = top_of(col_sic_desc)
+
+        # map into seg_counts by segment_id
+        seg_counts["top_country"] = seg_counts["segment_id"].map(top_country) if top_country is not None else "—"
+        seg_counts["top_entity"] = seg_counts["segment_id"].map(top_entity) if top_entity is not None else "—"
+        seg_counts["top_industry"] = seg_counts["segment_id"].map(top_ind) if top_ind is not None else "—"
+
+        seg_counts["segment_title"] = (
+            seg_counts["top_entity"].fillna("—").astype(str)
+            + " | " + seg_counts["top_industry"].fillna("—").astype(str)
+            + " | " + seg_counts["top_country"].fillna("—").astype(str)
+        )
+
+        return seg_counts
+
+    seg_counts = build_segment_tables_small(seg_df_base, col_country, col_entity, col_sic_desc)
+
+    # ---------- Controls (form prevents slider drag reruns) ----------
+    with st.form("seg_controls"):
+        st.markdown("### Controls (click Apply to update)")
+
+        cL, cR = st.columns(2)
+        with cL:
+            show_n = st.slider("Show top N segments", 10, min(200, len(seg_counts)), 30, 5, key="seg_show_n")
+        with cR:
+            top_k = st.slider("Bars to plot", 5, 30, 15, 1, key="seg_top_k")
+
+        sort_mode = st.selectbox(
+            "Sort segments by",
+            ["Largest segments (recommended)", "Segment ID"],
+            index=0,
+            key="seg_sort_mode"
+        )
+
+        applied = st.form_submit_button("Apply")
+
+    # Apply sorting
+    seg_view = seg_counts.copy()
+    if sort_mode == "Segment ID":
+        seg_view = seg_view.sort_values(["segment_id"], ascending=True).reset_index(drop=True)
+    else:
+        seg_view = seg_view.sort_values(["count", "segment_id"], ascending=[False, True]).reset_index(drop=True)
+
+    # ---------- Table ----------
+    st.markdown("### Segment list")
+    seg_table = seg_view.head(show_n)[["segment_key", "count", "share_%", "segment_title", "segment_label"]].copy()
+    st.dataframe(seg_table, use_container_width=True, height=420)
+
+    # ---------- Chart ----------
+    st.markdown("### Top segments (chart)")
+    top = seg_view.head(top_k).copy()
+    fig = plt.figure(figsize=(10, 5))
+    plt.barh(top["segment_key"].astype(str), top["count"])
+    plt.gca().invert_yaxis()
+    plt.xlabel("Company count")
+    plt.ylabel("Segment")
     st.pyplot(fig, clear_figure=True)
+
+    # ---------- Segment selector (FAST: use format_func, not a giant list of strings) ----------
+    st.markdown("### Segment deep dive")
+
+    # Limit dropdown to top N segments for performance
+    selector_df = seg_view.head(show_n).copy()
+
+    # Create a lookup dict for nice display in format_func
+    label_map = {}
+    for _, r in selector_df.iterrows():
+        label_map[int(r["segment_id"])] = f'{r["segment_key"]} — {r["segment_title"]} ({int(r["count"])})'
+
+    seg_ids = selector_df["segment_id"].astype(int).tolist()
+
+    selected_seg_id = st.selectbox(
+        "Select a segment (from the top list above)",
+        options=seg_ids,
+        index=0,
+        format_func=lambda x: label_map.get(int(x), f"S{int(x)}"),
+        key="seg_selected_id"
+    )
+
+    seg_row = seg_counts[seg_counts["segment_id"] == selected_seg_id].head(1)
+    seg_label = seg_row["segment_label"].iloc[0] if len(seg_row) else "Unknown"
+    seg_title = seg_row["segment_title"].iloc[0] if len(seg_row) else "—"
+    seg_size = int(seg_row["count"].iloc[0]) if len(seg_row) else 0
+
+    st.write(f"**Selected:** S{int(selected_seg_id)}  |  **Companies:** {seg_size:,}")
+    st.caption(f"**Segment definition (auto):** {seg_title}")
+    with st.expander("Raw segment label (full definition)", expanded=False):
+        st.code(str(seg_label))
+
+    seg_df = seg_df_base[seg_df_base["segment_id"] == selected_seg_id].copy()
+
+    # ---------- Snapshot ----------
+    st.markdown("#### Segment profile snapshot")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Companies", f"{len(seg_df):,}")
+    c2.metric("Countries (unique)", f"{seg_df[col_country].nunique(dropna=True):,}" if col_country else "—")
+    c3.metric("Entity types (unique)", f"{seg_df[col_entity].nunique(dropna=True):,}" if col_entity else "—")
+    c4.metric("Industry labels (unique)", f"{seg_df[col_sic_desc].nunique(dropna=True):,}" if col_sic_desc else "—")
+
+    # ---------- Benchmark ----------
+    st.markdown("#### Benchmark vs overall (median)")
+    compare_cols = [c for c in [col_emp, col_rev, col_it, col_dev] if c and c in seg_df_base.columns]
+
+    def med(series):
+        x = pd.to_numeric(series, errors="coerce")
+        v = np.nanmedian(x)
+        return float(v) if np.isfinite(v) else np.nan
+
+    if compare_cols:
+        bench_rows = []
+        for c in compare_cols:
+            seg_m = med(seg_df[c])
+            all_m = med(seg_df_base[c])
+            ratio = seg_m / all_m if (np.isfinite(seg_m) and np.isfinite(all_m) and all_m != 0) else np.nan
+            bench_rows.append({
+                "metric": c,
+                "segment_median": seg_m,
+                "overall_median": all_m,
+                "segment_vs_overall": round(ratio, 2) if np.isfinite(ratio) else np.nan,
+            })
+        st.dataframe(pd.DataFrame(bench_rows), use_container_width=True)
+    else:
+        st.info("No numeric benchmark columns found (employees/revenue/IT/device).")
+
+    # ---------- Dominant categories ----------
+    st.markdown("#### What dominates this segment?")
+    cA, cB, cC = st.columns(3)
+
+    with cA:
+        if col_country:
+            ct = seg_df[col_country].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
+            ct.columns = ["country", "count"]
+            st.write("Top countries")
+            st.dataframe(ct, use_container_width=True, height=260)
+        else:
+            st.caption("Country column not found.")
+
+    with cB:
+        if col_entity:
+            et = seg_df[col_entity].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
+            et.columns = ["entity_type", "count"]
+            st.write("Top entity types")
+            st.dataframe(et, use_container_width=True, height=260)
+        else:
+            st.caption("Entity type column not found.")
+
+    with cC:
+        if col_sic_desc:
+            ind = seg_df[col_sic_desc].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
+            ind.columns = ["industry_desc", "count"]
+            st.write("Top industries")
+            st.dataframe(ind, use_container_width=True, height=260)
+        else:
+            st.caption("Industry description column not found.")
+
+    # ---------- Sample companies ----------
+    st.markdown("#### Example companies in this segment")
+    if col_name:
+        preview_cols = [c for c in [col_name, col_country, col_entity, col_emp, col_rev, col_it, col_dev]
+                        if c and c in seg_df.columns]
+        st.dataframe(seg_df[preview_cols].head(30), use_container_width=True, height=420)
+    else:
+        st.dataframe(seg_df.head(30), use_container_width=True, height=420)
+
 
 # -----------------------------
 # AI Assistant (Sidebar)
