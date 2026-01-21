@@ -21,8 +21,11 @@ import re
 from huggingface_hub import InferenceClient
 
 # Initialize Client (Best practice: use st.secrets, but for now we paste directly)
-# REPLACE 'hf_xxxxxxxx' WITH YOUR ACTUAL TOKEN
-HF_TOKEN = "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" 
+try:
+    HF_TOKEN = st.secrets["HF_TOKEN"]
+except FileNotFoundError:
+    st.error("Secrets file not found. Please create .streamlit/secrets.toml")
+    st.stop()
 repo_id = "Qwen/Qwen2.5-72B-Instruct"
 llm_client = InferenceClient(model=repo_id, token=HF_TOKEN)
 
