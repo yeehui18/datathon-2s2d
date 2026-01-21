@@ -18,6 +18,38 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import re
+from huggingface_hub import InferenceClient
+
+# Initialize Client (Best practice: use st.secrets, but for now we paste directly)
+# REPLACE 'hf_xxxxxxxx' WITH YOUR ACTUAL TOKEN
+HF_TOKEN = "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" 
+repo_id = "Qwen/Qwen2.5-72B-Instruct"
+llm_client = InferenceClient(model=repo_id, token=HF_TOKEN)
+
+def get_dataframe_context(df, max_rows=5):
+    """
+    Creates a text summary of the current dataframe to send to the LLM.
+    Uses to_string() to avoid dependency on 'tabulate'.
+    """
+    if df.empty:
+        return "The dataset is currently empty."
+
+    # metrics summary
+    row_count = len(df)
+    col_names = ", ".join(df.columns.tolist())
+
+    # CHANGE: Use to_string instead of to_markdown
+    preview = df.head(max_rows).to_string(index=False)
+
+    context = f"""
+    Dataset Summary:
+    - Total Rows in current view: {row_count}
+    - Columns: {col_names}
+
+    Data Preview (First {max_rows} rows):
+    {preview}
+    """
+    return context
 
 # -----------------------------
 # Streamlit page
@@ -475,3 +507,67 @@ with tab2:
     plt.bar(top["segment_label"].astype(str), top["count"])
     plt.xticks(rotation=90)
     st.pyplot(fig, clear_figure=True)
+
+# -----------------------------
+# AI Assistant (Sidebar)
+# -----------------------------
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("🤖 AI Data Assistant")
+
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Display chat messages from history on app rerun
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # React to user input
+    if prompt := st.chat_input("Ask about the data..."):
+        # 1. Display user message
+        st.chat_message("user").markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        # 2. Build Context (The filtered data from your app)
+        # Use the 'filtered' dataframe from your main script
+        data_context = get_dataframe_context(filtered, max_rows=5)
+
+        # 3. Construct the prompt for the LLM
+        full_prompt = f"""
+        You are a helpful Data Analyst assistant. 
+        Analyze the following dataset snippet and answer the user's question.
+
+        CONTEXT DATA:
+        {data_context}
+
+        USER QUESTION: 
+        {prompt}
+
+        Answer concisely and based ONLY on the provided data context.
+        """
+
+        # 4. Stream the response
+        with st.chat_message("assistant"):
+            try:
+                # Helper: Yields text chunks from the API response
+                def stream_generator():
+                    stream = llm_client.chat_completion(
+                        messages=[{"role": "user", "content": full_prompt}],
+                        max_tokens=500,
+                        stream=True
+                    )
+                    for chunk in stream:
+                        # Extract text from the "delta" in the chunk
+                        if chunk.choices and chunk.choices[0].delta.content:
+                            yield chunk.choices[0].delta.content
+
+                # Streamlit writes the stream to the UI
+                response = st.write_stream(stream_generator())
+
+                # Save the final response to history
+                st.session_state.messages.append({"role": "assistant", "content": response})
+
+            except Exception as e:
+                st.error(f"Error communicating with API: {e}")
