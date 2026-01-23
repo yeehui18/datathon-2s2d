@@ -1,8 +1,3 @@
-You should copy the entire block of code below and paste it into your `README.md` file.
-
-This replaces your current messy text with the formatted version:
-
-```markdown
 # datathon-2s2d
 # NUS Datathon Category A: Company Intelligence Explorer
 
@@ -49,8 +44,6 @@ This project transforms raw company records into **data-grounded company intelli
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-```
 
 **For Windows (PowerShell):**
 
