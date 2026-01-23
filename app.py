@@ -1,5 +1,4 @@
 
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -131,6 +130,14 @@ def zero_to_nan(series: pd.Series) -> pd.Series:
 
 
 def pick_col(df: pd.DataFrame, candidates):
+    """
+    Safe picker: returns first matching column, or None.
+    Never crashes even if df is None.
+    """
+    if df is None:
+        return None
+    if not hasattr(df, "columns"):
+        return None
     cols = set(df.columns)
     for cand in candidates:
         if cand in cols:
@@ -180,7 +187,7 @@ def build_display_name(df: pd.DataFrame) -> pd.Series:
     IMPORTANT: prioritises company_sites (your dataset's "company name" column).
     """
     candidates = [
-        "company_sites",          # <-- key fix: treat as primary company name
+        "company_sites",          # <-- treat as primary company name
         "company_name",
         "name",
         "company",
@@ -192,7 +199,6 @@ def build_display_name(df: pd.DataFrame) -> pd.Series:
         if c in df.columns:
             s = df[c].astype(object)
             out = s.apply(lambda v: str(v).strip() if not pd.isna(v) else "")
-            # choose this field if it is reasonably populated
             if (out != "").mean() > 0.30:
                 out = out.replace({"": "UNKNOWN"})
                 return out
@@ -222,7 +228,7 @@ def load_and_clean(file) -> pd.DataFrame:
 
     # --- Normalise content text fields ---
     for c in [
-        "company_sites",  # <-- name column (normalise missing tokens only)
+        "company_sites",
         "website",
         "address_line_1",
         "country", "city", "state", "state_or_province_abbreviation",
@@ -309,7 +315,7 @@ def load_and_clean(file) -> pd.DataFrame:
     geo_cols = ["country", "state", "state_or_province_abbreviation", "city", "postal_code", "lattitude", "longitude"]
     ui_cols = [
         "duns_number",
-        "company_sites",  # <-- keep it explicitly
+        "company_sites",
         "website",
         "address_line_1",
         "phone_number",
@@ -351,7 +357,14 @@ def add_rule_segments(df_in: pd.DataFrame, min_industry_count: int, simple_segme
     - Structure tier (HQ / domestic ultimate / subsidiary / branch / etc.)
     - IT footprint tiers (it_spend, device_total)
     - Geography (country) if full mode
+
+    Adds:
+    - segment_label (raw, pipe-separated)
+    - segment_description (human-readable, with Undisclosed + field names)
     """
+    if df_in is None:
+        return None
+
     df = df_in.copy()
 
     # Industry bucket
@@ -440,6 +453,112 @@ def add_rule_segments(df_in: pd.DataFrame, min_industry_count: int, simple_segme
     df["segment_label"] = df[seg_parts].astype(str).agg("|".join, axis=1)
     df["segment_id"] = df["segment_label"].astype("category").cat.codes
 
+    # ---------- Human readable segment description (with field names for Undisclosed) ----------
+    emp_map = {
+        "emp_s": "small employee size",
+        "emp_m": "medium employee size",
+        "emp_l": "large employee size",
+        "emp_xl": "very large employee size",
+    }
+    rev_map = {
+        "rev_s": "small revenue tier",
+        "rev_m": "medium revenue tier",
+        "rev_l": "large revenue tier",
+        "rev_xl": "very large revenue tier",
+    }
+    it_map = {
+        "it_low": "low IT spend tier",
+        "it_mid": "medium IT spend tier",
+        "it_high": "high IT spend tier",
+        "it_top": "top IT spend tier",
+    }
+    dev_map = {
+        "dev_low": "low infrastructure scale",
+        "dev_mid": "medium infrastructure scale",
+        "dev_high": "high infrastructure scale",
+        "dev_top": "top infrastructure scale",
+    }
+    struct_map = {
+        "hq": "headquarters",
+        "domestic_ultimate": "domestic ultimate",
+        "subsidiary": "subsidiary",
+        "branch": "branch",
+        "subsidiary_like": "subsidiary like (has parent)",
+        "member_of_group": "member of a corporate group",
+        "standalone_like": "standalone like",
+    }
+
+    def _is_undisclosed(v):
+        if pd.isna(v):
+            return True
+        s = str(v).strip()
+        if s == "":
+            return True
+        if s.lower() == "unknown":
+            return True
+        return False
+
+    def _pretty_industry(row):
+        # Prefer sic_2digit for detail; fall back to sic_bucket
+        s2 = row.get("sic_2digit", "Unknown")
+        if _is_undisclosed(s2):
+            sb = row.get("sic_bucket", "Unknown")
+            if _is_undisclosed(sb):
+                return "Industry: undisclosed"
+            return f"Industry: {sb}"
+        return f"Industry: SIC prefix {str(s2)}"
+
+    def _pretty_size_emp(row):
+        v = row.get("size_emp_tier", "Unknown")
+        if _is_undisclosed(v):
+            return "Employees: undisclosed"
+        return "Employees: " + emp_map.get(str(v), str(v))
+
+    def _pretty_size_rev(row):
+        v = row.get("size_rev_tier", "Unknown")
+        if _is_undisclosed(v):
+            return "Revenue: undisclosed"
+        return "Revenue: " + rev_map.get(str(v), str(v))
+
+    def _pretty_structure(row):
+        v = row.get("structure_tier", "Unknown")
+        if _is_undisclosed(v):
+            return "Structure: undisclosed"
+        return "Structure: " + struct_map.get(str(v), str(v))
+
+    def _pretty_it(row):
+        v = row.get("it_spend_tier", "Unknown")
+        if _is_undisclosed(v):
+            return "IT spend: undisclosed"
+        return "IT spend: " + it_map.get(str(v), str(v))
+
+    def _pretty_devices(row):
+        v = row.get("device_tier", "Unknown")
+        if _is_undisclosed(v):
+            return "Devices: undisclosed"
+        return "Devices: " + dev_map.get(str(v), str(v))
+
+    def _pretty_geo(row):
+        v = row.get("geo_tier", "Unknown")
+        if _is_undisclosed(v):
+            return "Geography: undisclosed"
+        return "Geography: " + str(v)
+
+    def _segment_sentence(row):
+        parts = []
+        parts.append(_pretty_industry(row))
+        parts.append(_pretty_size_emp(row))
+        parts.append(_pretty_size_rev(row))
+        if not simple_segments:
+            parts.append(_pretty_structure(row))
+        parts.append(_pretty_it(row))
+        parts.append(_pretty_devices(row))
+        if not simple_segments:
+            parts.append(_pretty_geo(row))
+        return "; ".join(parts) + "."
+
+    df["segment_description"] = df.apply(_segment_sentence, axis=1).astype(object)
+
     return df
 
 
@@ -449,6 +568,11 @@ simple_segments = st.sidebar.toggle("Simple segments (recommended)", value=True)
 min_industry_count = st.sidebar.slider("Min companies per industry bucket", 10, 300, 80, 10)
 
 df = add_rule_segments(raw_df, min_industry_count=min_industry_count, simple_segments=simple_segments)
+
+# Guard: if segmentation accidentally returns None, stop cleanly (prevents NoneType crashes)
+if df is None:
+    st.error("Segmentation returned None. This usually means add_rule_segments() did not reach `return df` due to indentation or an exception.")
+    st.stop()
 
 
 # =========================
@@ -473,7 +597,7 @@ sel_state = multiselect_filter("State", col_state)
 sel_city = multiselect_filter("City", col_city)
 
 seg_vals = sorted(df["segment_label"].dropna().astype(str).unique())
-sel_segs = st.sidebar.multiselect("Segment", seg_vals)
+sel_segs = st.sidebar.multiselect("Segment (raw label)", seg_vals)
 
 filtered = df.copy()
 if col_country and sel_country:
@@ -507,6 +631,13 @@ def build_segment_profiles(d: pd.DataFrame) -> pd.DataFrame:
     prof = d.groupby(["segment_id", "segment_label"], dropna=False).agg(agg)
     prof["count"] = d.groupby(["segment_id", "segment_label"], dropna=False).size()
     prof = prof.reset_index().sort_values("count", ascending=False).reset_index(drop=True)
+
+    # Add segment_description (first non-null per segment_id)
+    if "segment_description" in d.columns:
+        desc_map = d.groupby("segment_id")["segment_description"].apply(lambda s: s.dropna().iloc[0] if len(s.dropna()) else "")
+        prof["segment_description"] = prof["segment_id"].map(desc_map)
+    else:
+        prof["segment_description"] = ""
 
     def top_cat_and_share(df_seg: pd.DataFrame, col: str):
         s = df_seg[col].fillna("Unknown").astype(str)
@@ -724,8 +855,8 @@ def nearest_peers(d: pd.DataFrame, row_idx: int, k: int = 10) -> pd.DataFrame:
     peers = peers.assign(peer_distance=dist).sort_values("peer_distance", ascending=True)
     peers = peers[peers.index != row_idx]
 
-    cols_show = ["display_name", "segment_label", "peer_distance"]
-    for c in ["company_sites", "country", "entity_type", "employees_total", "revenue_usd", "it_spend", "device_total"]:
+    cols_show = ["display_name", "peer_distance"]
+    for c in ["company_sites", "country", "entity_type", "employees_total", "revenue_usd", "it_spend", "device_total", "segment_description"]:
         if c in peers.columns and c not in cols_show:
             cols_show.append(c)
     return peers[cols_show].head(k)
@@ -735,7 +866,7 @@ def nearest_peers(d: pd.DataFrame, row_idx: int, k: int = 10) -> pd.DataFrame:
 # Tabs
 # =========================
 tab_overview, tab_segments, tab_company, tab_risk, tab_usecases = st.tabs(
-    ["Overview", "Segments", "Company benchmarking", "Risks and anomalies", "Buyer use cases"]
+    ["Overview", "Segments", "Company benchmarking", "Risks and anomalies", "Insights for buyers"]
 )
 
 # ---------- Overview ----------
@@ -763,7 +894,12 @@ with tab_overview:
             st.dataframe(miss_df, use_container_width=True)
 
     st.markdown("Top segments")
-    seg_counts = filtered.groupby(["segment_id", "segment_label"]).size().reset_index(name="count").sort_values("count", ascending=False)
+    seg_counts = (
+        filtered.groupby(["segment_id", "segment_description"], dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
+    )
     st.dataframe(seg_counts.head(30), use_container_width=True)
 
     if "country" in filtered.columns:
@@ -780,17 +916,28 @@ with tab_segments:
     if profiles is None or profiles.empty:
         st.warning("No segment profiles available (profiling failed or no data after filters).")
     else:
-        st.dataframe(profiles.head(100), use_container_width=True, height=420)
+        # Show human description early
+        show_cols = ["segment_id", "segment_description", "count", "segment_label"]
+        for c in profiles.columns:
+            if c not in show_cols:
+                show_cols.append(c)
+        show_cols = [c for c in show_cols if c in profiles.columns]
+
+        st.dataframe(profiles[show_cols].head(100), use_container_width=True, height=420)
 
         seg_ids = profiles["segment_id"].astype(int).tolist()
         selected_seg = st.selectbox("Select a segment to deep dive", options=seg_ids, format_func=lambda x: f"S{int(x)}")
 
         seg_row = profiles[profiles["segment_id"] == selected_seg].head(1)
         seg_label = seg_row["segment_label"].iloc[0] if len(seg_row) else "Unknown"
+        seg_desc = seg_row["segment_description"].iloc[0] if len(seg_row) else ""
         seg_df = filtered[filtered["segment_id"] == selected_seg].copy()
 
         st.write(f"Selected segment: S{int(selected_seg)}")
-        with st.expander("Segment label (definition)", expanded=False):
+        if seg_desc:
+            st.caption(seg_desc)
+
+        with st.expander("Raw segment label (technical)", expanded=False):
             st.code(str(seg_label))
 
         st.markdown("Typical values (median) and top composition fields")
@@ -837,7 +984,11 @@ with tab_company:
             seg_id = int(row["segment_id"])
 
             st.write(f"Segment: S{seg_id}")
-            with st.expander("Segment label", expanded=False):
+            seg_desc = str(row.get("segment_description", "")).strip()
+            if seg_desc:
+                st.caption(seg_desc)
+
+            with st.expander("Raw segment label (technical)", expanded=False):
                 st.code(str(row.get("segment_label", "Unknown")))
 
             show_cols = [
@@ -911,7 +1062,7 @@ with tab_risk:
 
     view = view.sort_values(["anomaly_severity"], ascending=False)
 
-    cols = ["company_sites", "display_name", "country", "entity_type", "segment_label", "anomaly_severity", "anomaly_explanation"]
+    cols = ["company_sites", "display_name", "country", "entity_type", "segment_description", "anomaly_severity", "anomaly_explanation"]
     cols = [c for c in cols if c in view.columns]
     for c in ["employees_total", "revenue_usd", "it_spend", "device_total", "corporate_family_members", "it_spend_to_revenue", "server_to_device_ratio"]:
         if c in view.columns:
@@ -927,11 +1078,11 @@ with tab_risk:
 
 # ---------- Buyer use cases ----------
 with tab_usecases:
-    st.subheader("Buyer workflows (commercial value)")
 
-    st.markdown("### 1) Market segmentation and lead targeting")
+    st.markdown("### 1) Dataset company list")
     lead_cols = [
-        "company_sites", "display_name", "country", "state", "city", "segment_label",
+        "company_sites", "display_name", "country", "state", "city",
+        "segment_description",
         "sic_description", "8_digit_sic_description",
         "employees_total", "revenue_usd", "it_spend", "device_total",
         "website", "phone_number"
@@ -959,7 +1110,7 @@ with tab_usecases:
     risk_view = an_df.copy()
     if "anomaly_severity" in risk_view.columns:
         risk_view = risk_view[risk_view["anomaly_severity"] > 0].sort_values("anomaly_severity", ascending=False)
-    risk_cols = [c for c in ["company_sites", "display_name", "country", "segment_label", "anomaly_severity", "anomaly_explanation"] if c in risk_view.columns]
+    risk_cols = [c for c in ["company_sites", "display_name", "country", "segment_description", "anomaly_severity", "anomaly_explanation"] if c in risk_view.columns]
     st.dataframe(risk_view[risk_cols].head(200), use_container_width=True)
     st.download_button(
         "Download screening list as CSV",
@@ -976,7 +1127,7 @@ with tab_usecases:
         if rank_metric_opts:
             rank_metric = st.selectbox("Rank segments by", options=rank_metric_opts, index=0)
             seg_rank = profiles.sort_values(rank_metric, ascending=False)
-            seg_it_cols = ["segment_id", "segment_label", "count"] + [c for c in rank_metric_opts if c in seg_rank.columns]
+            seg_it_cols = ["segment_id", "segment_description", "count"] + [c for c in rank_metric_opts if c in seg_rank.columns]
             st.dataframe(seg_rank[seg_it_cols].head(100), use_container_width=True)
         else:
             st.info("No IT intensity metrics found in profiles.")
@@ -1002,7 +1153,7 @@ def get_llm_client():
 
 
 def get_dataframe_context(df_in: pd.DataFrame, max_rows=8) -> str:
-    if df_in.empty:
+    if df_in is None or df_in.empty:
         return "The dataset view is empty."
     row_count = len(df_in)
     col_names = ", ".join(df_in.columns.tolist())
@@ -1038,7 +1189,7 @@ with st.sidebar:
             st.session_state.messages.append({"role": "user", "content": prompt})
 
             context = get_dataframe_context(filtered, max_rows=8)
-            seg_summary = filtered.groupby("segment_label").size().sort_values(ascending=False).head(10).to_string()
+            seg_summary = filtered.groupby("segment_description").size().sort_values(ascending=False).head(10).to_string()
 
             full_prompt = (
                 "You are a careful data analyst assistant.\n"
