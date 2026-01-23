@@ -1,23 +1,4 @@
-"""
-Company Segmentation and Intelligence Explorer (Streamlit)
 
-Covers all objectives:
-1) Group companies into interpretable segments using industry, size, structure, IT footprint, geography
-2) Generate segment profiles and compare within and across segments
-3) Detect patterns, risks, anomalies with statistical evidence
-4) Demonstrate commercial value via buyer workflows (lead targeting, benchmarking, risk screening, tech analysis)
-5) Bonus: Optional AI assistant + AI paraphrase for explanations, grounded on computed evidence only
-
-Key fixes included:
-- No pandas "string" dtype usage
-- Robust bucket parsing for device/server fields
-- Dedup: exact duplicates, then by duns_number (keep most complete)
-- FIXED merge error in segment profiling (no more level_1_x collisions)
-- FIXED NameError for profiles by defining profiles safely before tabs use it
-
-Run:
-  streamlit run app.py
-"""
 
 import streamlit as st
 import pandas as pd
@@ -59,6 +40,10 @@ def to_snake(s: str) -> str:
 
 
 def normalise_missing_text(series: pd.Series) -> pd.Series:
+    """
+    Normalise common missing tokens into NA.
+    Keeps dtype as plain object.
+    """
     s = series.astype(object)
     miss = {"", "na", "n/a", "none", "null", "unknown", "nan"}
     out = []
@@ -72,21 +57,36 @@ def normalise_missing_text(series: pd.Series) -> pd.Series:
 
 
 def clean_phone(x):
+    """
+    Excel sometimes stores phone numbers as floats/scientific notation.
+    Convert to a clean digits string where possible.
+    """
     if pd.isna(x):
         return pd.NA
     s = str(x).strip()
+
     try:
         f = float(s)
         if np.isfinite(f):
             return str(int(f))
     except Exception:
         pass
+
     if re.match(r"^\d+\.0$", s):
         return s[:-2]
+
     return s
 
 
 def bucket_to_midpoint(x):
+    """
+    Parse bucket ranges commonly found in device/server columns.
+    Examples:
+      '1 to 10' -> 5.5
+      '1,001 to 5,000' -> 3000.5
+      '100000+' -> 100000
+      '12' -> 12
+    """
     if pd.isna(x):
         return np.nan
     s = str(x).strip().lower().replace(",", "")
@@ -110,8 +110,11 @@ def bucket_to_midpoint(x):
 
 
 def safe_numeric(series: pd.Series) -> pd.Series:
+    """
+    Convert to numeric safely.
+    If most values fail numeric conversion, attempt bucket_to_midpoint parsing.
+    """
     x = pd.to_numeric(series, errors="coerce")
-    # If most values are NaN after numeric conversion, try bucket parsing
     if x.notna().mean() < 0.30:
         x2 = series.map(bucket_to_midpoint)
         if pd.Series(x2).notna().mean() > x.notna().mean():
@@ -120,6 +123,9 @@ def safe_numeric(series: pd.Series) -> pd.Series:
 
 
 def zero_to_nan(series: pd.Series) -> pd.Series:
+    """
+    Convert 0 -> NaN for columns where 0 is likely a missing placeholder.
+    """
     x = pd.to_numeric(series, errors="coerce")
     return x.mask(x == 0, np.nan)
 
@@ -169,13 +175,27 @@ def sic_prefix(x, n=2):
 
 
 def build_display_name(df: pd.DataFrame) -> pd.Series:
-    candidates = ["company_name", "name", "company", "website", "duns_number", "address_line_1"]
+    """
+    Build a human-friendly label for UI dropdowns.
+    IMPORTANT: prioritises company_sites (your dataset's "company name" column).
+    """
+    candidates = [
+        "company_sites",          # <-- key fix: treat as primary company name
+        "company_name",
+        "name",
+        "company",
+        "website",
+        "duns_number",
+        "address_line_1",
+    ]
     for c in candidates:
         if c in df.columns:
             s = df[c].astype(object)
             out = s.apply(lambda v: str(v).strip() if not pd.isna(v) else "")
-            if (out != "").mean() > 0.50:
-                return out.replace({"": "UNKNOWN"})
+            # choose this field if it is reasonably populated
+            if (out != "").mean() > 0.30:
+                out = out.replace({"": "UNKNOWN"})
+                return out
     return pd.Series(["UNKNOWN"] * len(df), index=df.index, dtype=object)
 
 
@@ -187,7 +207,7 @@ def load_and_clean(file) -> pd.DataFrame:
     df = pd.read_excel(file)
     df.columns = [to_snake(c) for c in df.columns]
 
-    # --- Dedup: exact duplicates first ---
+    # --- Dedup: exact duplicates ---
     before = len(df)
     df = df.drop_duplicates()
     after_exact = len(df)
@@ -200,28 +220,33 @@ def load_and_clean(file) -> pd.DataFrame:
 
     df = df.reset_index(drop=True)
 
-    # --- Normalise content fields ---
+    # --- Normalise content text fields ---
     for c in [
+        "company_sites",  # <-- name column (normalise missing tokens only)
+        "website",
+        "address_line_1",
         "country", "city", "state", "state_or_province_abbreviation",
         "entity_type", "ownership_type", "legal_status",
         "company_status_active_inactive",
         "sic_description", "8_digit_sic_description",
-        "website", "address_line_1",
-        "parent_company", "global_ultimate_company", "domestic_ultimate_company"
+        "parent_company", "global_ultimate_company", "domestic_ultimate_company",
     ]:
         if c in df.columns:
             df[c] = normalise_missing_text(df[c])
 
+    # Country: case normalisation
     if "country" in df.columns:
         df["country"] = df["country"].astype(object).apply(lambda x: str(x).upper().strip() if not pd.isna(x) else pd.NA)
 
+    # Entity type: consistent casing for UI
     if "entity_type" in df.columns:
         df["entity_type"] = df["entity_type"].astype(object).apply(lambda x: str(x).strip().title() if not pd.isna(x) else pd.NA)
 
+    # Phone number
     if "phone_number" in df.columns:
         df["phone_number"] = df["phone_number"].apply(clean_phone)
 
-    # --- Numeric conversion and placeholder zeros ---
+    # --- Numeric conversions and placeholder zeros ---
     placeholder_zero_cols = [
         "employees_total", "employees_single_site",
         "revenue_usd", "market_value_usd",
@@ -232,19 +257,20 @@ def load_and_clean(file) -> pd.DataFrame:
         if c in df.columns:
             df[c] = zero_to_nan(df[c])
 
+    # Year found sanity
     if "year_found" in df.columns:
         y = pd.to_numeric(df["year_found"], errors="coerce")
         df["year_found"] = y.mask((y <= 1700) | (y > 2026), np.nan)
 
-    # --- Device bucket parsing ---
+    # --- Device/server columns: parse buckets -> numeric midpoints, keep raw bucket too ---
     device_cols = [
         "no_of_pc", "no_of_desktops", "no_of_laptops",
         "no_of_routers", "no_of_servers", "no_of_storage_devices"
     ]
     for c in device_cols:
         if c in df.columns:
-            df[c + "_bucket"] = normalise_missing_text(df[c])
-            df[c] = safe_numeric(df[c])
+            df[c + "_bucket"] = normalise_missing_text(df[c])  # raw bucket string for UI
+            df[c] = safe_numeric(df[c])                        # numeric midpoints for modelling
 
     dev_present = [c for c in device_cols if c in df.columns]
     df["device_total"] = df[dev_present].sum(axis=1, min_count=1) if dev_present else np.nan
@@ -268,7 +294,7 @@ def load_and_clean(file) -> pd.DataFrame:
     if "no_of_desktops" in df.columns and "device_total" in df.columns:
         df["desktop_to_device_ratio"] = df["no_of_desktops"] / df["device_total"]
 
-    # --- Keep columns for 5 attribute groups + UI ---
+    # --- Keep only columns relevant to objectives (5 attribute groups + UI) ---
     industry_cols = ["sic_code", "sic_description", "8_digit_sic_code", "8_digit_sic_description", "naics_code", "naics_description"]
     size_cols = ["employees_single_site", "employees_total", "revenue_usd", "market_value_usd", "year_found", "revenue_per_employee"]
     structure_cols = [
@@ -282,22 +308,27 @@ def load_and_clean(file) -> pd.DataFrame:
     ] + device_cols + [c + "_bucket" for c in device_cols if c in df.columns]
     geo_cols = ["country", "state", "state_or_province_abbreviation", "city", "postal_code", "lattitude", "longitude"]
     ui_cols = [
-        "duns_number", "company_sites", "website", "address_line_1",
-        "phone_number", "registration_number",
-        "company_description", "company_status_active_inactive", "legal_status"
+        "duns_number",
+        "company_sites",  # <-- keep it explicitly
+        "website",
+        "address_line_1",
+        "phone_number",
+        "registration_number",
+        "company_description",
+        "company_status_active_inactive",
+        "legal_status",
     ]
 
     keep = []
     for grp in [industry_cols, size_cols, structure_cols, it_cols, geo_cols, ui_cols]:
         keep += [c for c in grp if c in df.columns]
     keep = list(dict.fromkeys(keep))
-
     df = df[keep].copy()
 
-    # --- Display name for UI ---
+    # --- Add display_name for dropdowns (company_sites first) ---
     df["display_name"] = build_display_name(df)
 
-    # --- Dedup stats stored as attrs (safe to read later) ---
+    # Store dedup stats
     df.attrs["dedup_before"] = before
     df.attrs["dedup_after_exact"] = after_exact
     df.attrs["dedup_after_key"] = len(df)
@@ -313,6 +344,14 @@ raw_df = load_and_clean(uploaded)
 # =========================
 @st.cache_data
 def add_rule_segments(df_in: pd.DataFrame, min_industry_count: int, simple_segments: bool) -> pd.DataFrame:
+    """
+    Interpretable segments based on:
+    - Industry bucket (SIC 2-digit, rare -> Other)
+    - Size tiers (employees, revenue)
+    - Structure tier (HQ / domestic ultimate / subsidiary / branch / etc.)
+    - IT footprint tiers (it_spend, device_total)
+    - Geography (country) if full mode
+    """
     df = df_in.copy()
 
     # Industry bucket
@@ -327,7 +366,7 @@ def add_rule_segments(df_in: pd.DataFrame, min_industry_count: int, simple_segme
     df["sic_bucket"] = df["sic_2digit"].where(~df["sic_2digit"].isin(rare), "Other")
     df["sic_bucket"] = df["sic_bucket"].fillna("Unknown")
 
-    # Robust qcut on rank to avoid duplicates edge issues
+    # Safer qcut using ranks
     def qcut_rank(series: pd.Series, labels):
         x = pd.to_numeric(series, errors="coerce")
         if x.notna().sum() < 40:
@@ -404,7 +443,7 @@ def add_rule_segments(df_in: pd.DataFrame, min_industry_count: int, simple_segme
     return df
 
 
-# Segmentation controls
+# Sidebar segmentation controls
 st.sidebar.subheader("Segmentation settings")
 simple_segments = st.sidebar.toggle("Simple segments (recommended)", value=True)
 min_industry_count = st.sidebar.slider("Min companies per industry bucket", 10, 300, 80, 10)
@@ -452,7 +491,7 @@ st.sidebar.caption(f"Filtered rows: {len(filtered):,}")
 
 
 # =========================
-# Segment profiling (FIXED: no merge collisions)
+# Segment profiling (no merge collisions)
 # =========================
 @st.cache_data
 def build_segment_profiles(d: pd.DataFrame) -> pd.DataFrame:
@@ -465,14 +504,10 @@ def build_segment_profiles(d: pd.DataFrame) -> pd.DataFrame:
     ] if c in d.columns]
 
     agg = {m: "median" for m in metrics}
-    prof = (
-        d.groupby(["segment_id", "segment_label"], dropna=False)
-         .agg(agg)
-    )
+    prof = d.groupby(["segment_id", "segment_label"], dropna=False).agg(agg)
     prof["count"] = d.groupby(["segment_id", "segment_label"], dropna=False).size()
     prof = prof.reset_index().sort_values("count", ascending=False).reset_index(drop=True)
 
-    # Composition: top category + share per segment (no apply->level_1 columns)
     def top_cat_and_share(df_seg: pd.DataFrame, col: str):
         s = df_seg[col].fillna("Unknown").astype(str)
         vc = s.value_counts()
@@ -483,8 +518,10 @@ def build_segment_profiles(d: pd.DataFrame) -> pd.DataFrame:
         return (top, share)
 
     comp_cols = []
-    for col in ["country", "entity_type", "sic_description", "8_digit_sic_description",
-                "sic_bucket", "structure_tier", "state", "city"]:
+    for col in [
+        "country", "entity_type", "sic_description", "8_digit_sic_description",
+        "sic_bucket", "structure_tier", "state", "city"
+    ]:
         if col in d.columns:
             comp_cols.append(col)
 
@@ -509,7 +546,7 @@ def build_segment_profiles(d: pd.DataFrame) -> pd.DataFrame:
 def compute_anomalies(d: pd.DataFrame) -> pd.DataFrame:
     out = d.copy()
 
-    # 1) IT spend relative to size (regression residual)
+    # 1) IT spend relative to size (log regression residual)
     y_col = "it_spend" if "it_spend" in out.columns else None
     x_cols = [c for c in ["employees_total", "revenue_usd"] if c in out.columns]
     if y_col and x_cols:
@@ -688,8 +725,8 @@ def nearest_peers(d: pd.DataFrame, row_idx: int, k: int = 10) -> pd.DataFrame:
     peers = peers[peers.index != row_idx]
 
     cols_show = ["display_name", "segment_label", "peer_distance"]
-    for c in ["country", "entity_type", "employees_total", "revenue_usd", "it_spend", "device_total"]:
-        if c in peers.columns:
+    for c in ["company_sites", "country", "entity_type", "employees_total", "revenue_usd", "it_spend", "device_total"]:
+        if c in peers.columns and c not in cols_show:
             cols_show.append(c)
     return peers[cols_show].head(k)
 
@@ -718,7 +755,7 @@ with tab_overview:
             f"{raw_df.attrs.get('dedup_after_exact', 'NA')} -> "
             f"{raw_df.attrs.get('dedup_after_key', 'NA')}"
         )
-        key_cols = [c for c in ["sic_code", "8_digit_sic_code", "employees_total", "revenue_usd", "it_spend", "device_total", "corporate_family_members", "country", "entity_type"] if c in filtered.columns]
+        key_cols = [c for c in ["company_sites", "sic_code", "8_digit_sic_code", "employees_total", "revenue_usd", "it_spend", "device_total", "corporate_family_members", "country", "entity_type"] if c in filtered.columns]
         if key_cols:
             miss = (filtered[key_cols].isna().mean() * 100).round(1).sort_values(ascending=False)
             miss_df = miss.reset_index()
@@ -804,12 +841,13 @@ with tab_company:
                 st.code(str(row.get("segment_label", "Unknown")))
 
             show_cols = [
-                "display_name", "country", "entity_type",
+                "company_sites", "display_name", "country", "entity_type",
                 "sic_description", "8_digit_sic_description",
                 "employees_total", "revenue_usd",
                 "it_spend", "it_budget",
                 "device_total", "corporate_family_members",
-                "structure_tier"
+                "structure_tier",
+                "website", "phone_number", "address_line_1"
             ]
             show_cols = [c for c in show_cols if c in filtered.columns]
             st.markdown("Company record (selected columns)")
@@ -845,7 +883,6 @@ with tab_company:
                 if np.isfinite(p_fam) and p_fam >= 95:
                     insights.append(f"Corporate family size is unusually large (around {p_fam:.0f}th percentile in segment).")
 
-            # Add anomaly evidence if present
             if row_idx in an_df.index and "anomaly_explanation" in an_df.columns:
                 expl = str(an_df.loc[row_idx].get("anomaly_explanation", "")).strip()
                 if expl:
@@ -874,7 +911,8 @@ with tab_risk:
 
     view = view.sort_values(["anomaly_severity"], ascending=False)
 
-    cols = ["display_name", "country", "entity_type", "segment_label", "anomaly_severity", "anomaly_explanation"]
+    cols = ["company_sites", "display_name", "country", "entity_type", "segment_label", "anomaly_severity", "anomaly_explanation"]
+    cols = [c for c in cols if c in view.columns]
     for c in ["employees_total", "revenue_usd", "it_spend", "device_total", "corporate_family_members", "it_spend_to_revenue", "server_to_device_ratio"]:
         if c in view.columns:
             cols.append(c)
@@ -892,10 +930,12 @@ with tab_usecases:
     st.subheader("Buyer workflows (commercial value)")
 
     st.markdown("### 1) Market segmentation and lead targeting")
-    lead_cols = ["display_name", "country", "state", "city", "segment_label",
-                 "sic_description", "8_digit_sic_description",
-                 "employees_total", "revenue_usd", "it_spend", "device_total",
-                 "website", "phone_number"]
+    lead_cols = [
+        "company_sites", "display_name", "country", "state", "city", "segment_label",
+        "sic_description", "8_digit_sic_description",
+        "employees_total", "revenue_usd", "it_spend", "device_total",
+        "website", "phone_number"
+    ]
     lead_cols = [c for c in lead_cols if c in filtered.columns]
     st.dataframe(filtered[lead_cols].head(200), use_container_width=True)
     st.download_button(
@@ -919,7 +959,7 @@ with tab_usecases:
     risk_view = an_df.copy()
     if "anomaly_severity" in risk_view.columns:
         risk_view = risk_view[risk_view["anomaly_severity"] > 0].sort_values("anomaly_severity", ascending=False)
-    risk_cols = [c for c in ["display_name", "country", "segment_label", "anomaly_severity", "anomaly_explanation"] if c in risk_view.columns]
+    risk_cols = [c for c in ["company_sites", "display_name", "country", "segment_label", "anomaly_severity", "anomaly_explanation"] if c in risk_view.columns]
     st.dataframe(risk_view[risk_cols].head(200), use_container_width=True)
     st.download_button(
         "Download screening list as CSV",
@@ -941,12 +981,14 @@ with tab_usecases:
         else:
             st.info("No IT intensity metrics found in profiles.")
 
+
 # =========================
-# Optional AI helper functions (kept minimal and safe)
+# Optional AI Assistant (Sidebar)
 # =========================
 def get_llm_client():
     if not HF_AVAILABLE:
         return None
+    token = None
     try:
         token = st.secrets.get("HF_TOKEN", None)
     except Exception:
@@ -972,9 +1014,7 @@ def get_dataframe_context(df_in: pd.DataFrame, max_rows=8) -> str:
         f"Data Preview (first {max_rows} rows):\n{preview}\n"
     )
 
-# =========================
-# Sidebar AI assistant (optional)
-# =========================
+
 with st.sidebar:
     st.markdown("---")
     st.subheader("AI Data Assistant")
