@@ -1,8 +1,8 @@
 # datathon-2s2d
 # NUS Datathon Category A: Company Intelligence Explorer
 
-**Team:** <TEAM_NAME>  
-**Folder name (submission):** `NUS_DATATHON_CAT_A_<TEAM_NAME>`
+**Team:** 2son2daughters
+**Folder name (submission):** `NUS_DATATHON_CAT_A_2son2daughters`
 
 ## Overview
 This project transforms raw company records into **data-grounded company intelligence** by:
@@ -16,7 +16,7 @@ This project transforms raw company records into **data-grounded company intelli
 ## What is included
 
 ### Required submission files:
-- `CAT_A_<TEAM_NAME>.ipynb`  
+- `CAT_A_2son2daughters.ipynb`  
   End-to-end notebook (loading, cleaning, segmentation, profiling, insights, outputs).
 - `requirements.txt`  
   All Python packages with versions.
@@ -64,7 +64,7 @@ jupyter notebook
 ```
 
 
-2. Open `CAT_A_<TEAM_NAME>.ipynb`.
+2. Open `CAT_A_2son2daughters.ipynb`.
 3. Run all cells from top to bottom.
 
 **Notebook outputs may include:**
