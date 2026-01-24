@@ -866,11 +866,21 @@ def nearest_peers(d: pd.DataFrame, row_idx: int, k: int = 10) -> pd.DataFrame:
 # Tabs
 # =========================
 tab_overview, tab_segments, tab_company, tab_risk, tab_usecases = st.tabs(
-    ["Overview", "Segments", "Company benchmarking", "Risks and anomalies", "Insights for buyers"]
+    ["Overview", "Segments", "Company benchmarking", "Unusual patterns", "Insights for buyers"]
 )
 
 # ---------- Overview ----------
 with tab_overview:
+
+    st.info(
+        "**How to use this dashboard (non-technical):**\n\n"
+        "1) Upload the Excel file (left sidebar)\n"
+        "2) Use filters (country, entity type, etc.) to narrow the view\n"
+        "3) Explore **Segments** → understand typical company groups\n"
+        "4) Use **Company benchmarking** → compare one company vs similar peers\n"
+        "5) Use **Unsual patterns** → screening signals (not a credit rating)\n"
+    )
+
     st.subheader("Overview")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -886,7 +896,11 @@ with tab_overview:
             f"{raw_df.attrs.get('dedup_after_exact', 'NA')} -> "
             f"{raw_df.attrs.get('dedup_after_key', 'NA')}"
         )
-        key_cols = [c for c in ["company_sites", "sic_code", "8_digit_sic_code", "employees_total", "revenue_usd", "it_spend", "device_total", "corporate_family_members", "country", "entity_type"] if c in filtered.columns]
+        key_cols = [c for c in [
+            "company_sites", "sic_code", "8_digit_sic_code", "employees_total",
+            "revenue_usd", "it_spend", "device_total", "corporate_family_members",
+            "country", "entity_type"
+        ] if c in filtered.columns]
         if key_cols:
             miss = (filtered[key_cols].isna().mean() * 100).round(1).sort_values(ascending=False)
             miss_df = miss.reset_index()
@@ -937,7 +951,7 @@ with tab_segments:
         if seg_desc:
             st.caption(seg_desc)
 
-        with st.expander("Raw segment label (technical)", expanded=False):
+        with st.expander("Technical segment code", expanded=False):
             st.code(str(seg_label))
 
         st.markdown("Typical values (median) and top composition fields")
@@ -1023,10 +1037,10 @@ with tab_company:
             else:
                 st.caption("No strong signals detected from the current metrics and thresholds.")
 
-# ---------- Risks and anomalies ----------
+# ---------- Unusual patterns ----------
 with tab_risk:
-    st.subheader("Risks and anomalies")
-    st.caption("Flagged companies are surfaced using robust statistics with evidence-based explanations.")
+    st.subheader("Unusual patterns")
+    st.caption("Shows companies that look unusually different from similar peers (same segment).")
 
     flagged_only = st.toggle("Show flagged companies only", value=True)
     view = an_df.copy()
@@ -1176,3 +1190,123 @@ with st.sidebar:
                     st.session_state.messages.append({"role": "assistant", "content": txt if txt else "No response returned."})
                 except Exception as e:
                     st.error(f"Error communicating with API: {e}")
+
+
+NOT_DISCLOSED = "Not disclosed"
+
+def _ui_clean_value(v):
+    if pd.isna(v):
+        return NOT_DISCLOSED
+    s = str(v).strip()
+    if s == "" or s.lower() in {"unknown", "nan", "none", "null", "na", "n/a"}:
+        return NOT_DISCLOSED
+    return v
+
+def _ui_clean_df(df_in):
+    if df_in is None:
+        return df_in
+    if not hasattr(df_in, "copy"):
+        return df_in
+    d = df_in.copy()
+    for c in d.columns:
+        if d[c].dtype == object or str(d[c].dtype).startswith("string"):
+            d[c] = d[c].map(_ui_clean_value)
+    return d
+
+# --- st.dataframe to auto-clean "Unknown"/NaN to "Not disclosed"
+_orig_dataframe = st.dataframe
+def _patched_dataframe(data=None, *args, **kwargs):
+    if isinstance(data, pd.DataFrame):
+        data = _ui_clean_df(data)
+    return _orig_dataframe(data, *args, **kwargs)
+st.dataframe = _patched_dataframe
+
+# --- st.metric to avoid showing "Unknown"
+_orig_metric = st.metric
+def _patched_metric(label, value=None, *args, **kwargs):
+    if isinstance(value, str):
+        value = _ui_clean_value(value)
+    return _orig_metric(label, value, *args, **kwargs)
+st.metric = _patched_metric
+
+def _short_segment_title(seg_desc: str) -> str:
+    if seg_desc is None or (isinstance(seg_desc, float) and np.isnan(seg_desc)):
+        return "Group with limited disclosures"
+    s = str(seg_desc)
+
+    def pick(pattern, mapping):
+        m = re.search(pattern, s, flags=re.I)
+        if not m:
+            return None
+        key = m.group(1).strip().lower()
+        for k, v in mapping.items():
+            if k in key:
+                return v
+        return None
+
+    emp = pick(r"Employees:\s*([^;]+)", {
+        "very large": "Very large companies",
+        "large": "Large companies",
+        "medium": "Mid-sized companies",
+        "small": "Smaller companies",
+        "undisclosed": None,
+    })
+    rev = pick(r"Revenue:\s*([^;]+)", {
+        "very large": "High revenue",
+        "large": "High revenue",
+        "medium": "Mid revenue",
+        "small": "Lower revenue",
+        "undisclosed": None,
+    })
+    it  = pick(r"IT spend:\s*([^;]+)", {
+        "top": "Very high IT spend",
+        "high": "High IT spend",
+        "medium": "Mid IT spend",
+        "low": "Lower IT spend",
+        "undisclosed": None,
+    })
+    dev = pick(r"Devices:\s*([^;]+)", {
+        "top": "Large infrastructure",
+        "high": "Large infrastructure",
+        "medium": "Moderate infrastructure",
+        "low": "Smaller infrastructure",
+        "undisclosed": None,
+    })
+
+    parts = [p for p in [emp, rev, it, dev] if p]
+    if not parts:
+        return "Group with limited disclosures"
+
+    seen = set()
+    out = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return " • ".join(out[:4])
+
+
+
+# --- Rename tabs visually by injecting a CSS label overlay 
+st.markdown("""
+<style>
+/* Cosmetic: make tab labels friendlier without changing code structure */
+button[data-baseweb="tab"] > div > div { font-weight: 600; }
+</style>
+""", unsafe_allow_html=True)
+
+try:
+    if "segment_description" in df.columns:
+        # map raw label to short title
+        _seg_map = (
+            df[["segment_label", "segment_description"]]
+            .dropna()
+            .drop_duplicates()
+            .set_index("segment_label")["segment_description"]
+            .to_dict()
+        )
+        df["segment_title"] = df["segment_label"].map(lambda x: _short_segment_title(_seg_map.get(x, "")))
+        if "filtered" in globals() and isinstance(filtered, pd.DataFrame) and "segment_label" in filtered.columns:
+            filtered["segment_title"] = filtered["segment_label"].map(lambda x: _short_segment_title(_seg_map.get(x, "")))
+except Exception:
+    pass
