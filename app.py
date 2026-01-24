@@ -943,28 +943,6 @@ with tab_segments:
         st.markdown("Typical values (median) and top composition fields")
         st.dataframe(seg_row, use_container_width=True)
 
-        cA, cB, cC = st.columns(3)
-        with cA:
-            if "country" in seg_df.columns:
-                st.write("Country composition (top 10)")
-                t = seg_df["country"].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
-                t.columns = ["country", "count"]
-                st.dataframe(t, use_container_width=True, height=260)
-
-        with cB:
-            if "entity_type" in seg_df.columns:
-                st.write("Entity type composition (top 10)")
-                t = seg_df["entity_type"].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
-                t.columns = ["entity_type", "count"]
-                st.dataframe(t, use_container_width=True, height=260)
-
-        with cC:
-            ind_col = "8_digit_sic_description" if "8_digit_sic_description" in seg_df.columns else ("sic_description" if "sic_description" in seg_df.columns else None)
-            if ind_col:
-                st.write("Industry composition (top 10)")
-                t = seg_df[ind_col].fillna("Unknown").astype(str).value_counts().head(10).reset_index()
-                t.columns = ["industry", "count"]
-                st.dataframe(t, use_container_width=True, height=260)
 
 # ---------- Company benchmarking ----------
 with tab_company:
@@ -1079,24 +1057,7 @@ with tab_risk:
 # ---------- Buyer use cases ----------
 with tab_usecases:
 
-    st.markdown("### 1) Dataset company list")
-    lead_cols = [
-        "company_sites", "display_name", "country", "state", "city",
-        "segment_description",
-        "sic_description", "8_digit_sic_description",
-        "employees_total", "revenue_usd", "it_spend", "device_total",
-        "website", "phone_number"
-    ]
-    lead_cols = [c for c in lead_cols if c in filtered.columns]
-    st.dataframe(filtered[lead_cols].head(200), use_container_width=True)
-    st.download_button(
-        "Download leads as CSV",
-        data=filtered[lead_cols].to_csv(index=False).encode("utf-8"),
-        file_name="leads.csv",
-        mime="text/csv"
-    )
-
-    st.markdown("### 2) Competitive benchmarking")
+    st.markdown("### 1) Competitive benchmarking")
     companies2 = sorted(filtered["display_name"].fillna("UNKNOWN").astype(str).unique())
     if companies2:
         comp2 = st.selectbox("Select a company for benchmarking", companies2, key="usecase_company")
@@ -1106,7 +1067,7 @@ with tab_usecases:
             st.dataframe(compute_company_percentiles(filtered, idx2), use_container_width=True)
             st.dataframe(nearest_peers(filtered, idx2, k=15), use_container_width=True)
 
-    st.markdown("### 3) Risk assessment and compliance screening")
+    st.markdown("### 2) Risk assessment and compliance screening")
     risk_view = an_df.copy()
     if "anomaly_severity" in risk_view.columns:
         risk_view = risk_view[risk_view["anomaly_severity"] > 0].sort_values("anomaly_severity", ascending=False)
@@ -1119,7 +1080,7 @@ with tab_usecases:
         mime="text/csv"
     )
 
-    st.markdown("### 4) Technology investment analysis")
+    st.markdown("### 3) Technology investment analysis")
     if profiles is None or profiles.empty:
         st.info("Segment profiles not available, cannot rank segments by IT intensity.")
     else:
